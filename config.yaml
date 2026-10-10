@@ -2,18 +2,18 @@
 
 # 模型配置
 model:
-  ref_model_path: "./Qwen2.5-1.5B-Instruct"
-  pretrained_model_path: "./Qwen2.5-1.5B-Instruct"
+  ref_model_path: "/data/mfx/train/grpo/model/Qwen2.5-1.5B-Instruct"
+  pretrained_model_path: "/data/mfx/train/grpo/model/Qwen2.5-1.5B-Instruct"
   dtype: "bfloat16"
 
 # 数据配置
 data:
-  data_path: "./gsm8k"
-  max_gen_len: 500
-  test_size: 100
-  sample_batch_size: 8 # 采样批次大小
+  data_path: "/data/mfx/train/grpo/data/gsm8k"
+  max_gen_len: 300
+  test_size: 50
+  sample_batch_size: 4 # 采样批次大小
   train_batch_size: 4  # 单进程训练批次大小
-  test_batch_size: 20  # 评估批次大小
+  test_batch_size: 4  # 评估批次大小
   num_answers_per_question: 4 # 每个问题组内采样数量
 
 # 训练配置
@@ -36,8 +36,8 @@ deepspeed:
 
 # GPU配置
 gpu:
-  sampling_gpu: 2      # 采样进程使用的GPU
-  training_gpu: [0, 1]  # 训练进程使用的GPU列表
+  sampling_gpu: 0      # 采样进程使用的GPU
+  training_gpu: [1]  # 训练进程使用的GPU列表
 
 # 检查点配置
 checkpoint:
@@ -46,7 +46,7 @@ checkpoint:
 
 # LoRA配置
 lora:
-  enabled: false
+  enabled: true
   adapter_dir: "./lora_adapter"
   rank: 32
   alpha: 64

@@ -97,7 +97,7 @@ class TrainingWorker:
         # DeepSpeed配置和初始化
         print("正在使用DeepSpeed进行优化训练...")
 
-        dist.init_process_group(backend='gloo')  # autodl的vgpu没法用nccl通信, 需要设置为gloo
+        dist.init_process_group(backend='nccl')  # autodl的vgpu没法用nccl通信, 需要设置为gloo
 
         # 获取当前进程的rank和world_size
         self.rank = dist.get_rank()

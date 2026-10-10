@@ -225,7 +225,7 @@ def smart_float(s: str) -> float:
     try:
         # 尝试分数
         return float(Fraction(s))
-    except ValueError:
+    except (ValueError, ZeroDivisionError):
         # 普通数字
         return float(s)
 
