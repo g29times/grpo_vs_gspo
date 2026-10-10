@@ -10,3 +10,4 @@ deepspeed
 peft
 pyzmq
 pandas
+wandb==0.19.11

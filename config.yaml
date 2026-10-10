@@ -52,3 +52,10 @@ lora:
   alpha: 64
   learning_rate: 2e-4
   dropout: 0.02
+
+wandb:
+  enabled: false
+  project: "grpo-vs-gspo"
+  entity: null
+  name: null
+  mode: "online"

@@ -63,7 +63,9 @@ class TrainingWorker:
         self.world_size = 1
         self.is_main_process = True
 
+        self.wandb_run = None
         self.setup_model()
+        self.setup_wandb(config.get("wandb", {}))
         self.setup_zmq()
         self.stop_event = threading.Event()
 
@@ -123,6 +125,7 @@ class TrainingWorker:
 
         if self.use_lora:
             ds_config['optimizer']['params']['lr'] = self.lora_lr
+        self.learning_rate = float(ds_config['optimizer']['params']['lr'])
 
         # 初始化DeepSpeed引擎
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
@@ -157,6 +160,59 @@ class TrainingWorker:
         self.data_receiver = self.context.socket(zmq.PULL)
         self.data_receiver.connect(f"tcp://localhost:{self.zmq_data_port}")
         print(f"ZeroMQ数据接收端口连接: {self.zmq_data_port}")
+
+    def setup_wandb(self, config: dict):
+        if not config.get("enabled", False) or not self.is_main_process:
+            return
+        try:
+            import wandb
+
+            self.wandb_run = wandb.init(
+                project=config.get("project", "grpo-vs-gspo"),
+                entity=config.get("entity") or None,
+                name=config.get("name") or None,
+                mode=config.get("mode", "online"),
+                config={
+                    "algorithm": "GSPO" if self.use_gspo else "GRPO",
+                    "learning_rate": self.learning_rate,
+                    "use_lora": self.use_lora,
+                    "lora_rank": self.lora_rank if self.use_lora else None,
+                    "lora_alpha": self.lora_alpha if self.use_lora else None,
+                    "model": Path(self.pretrained_model_path).name,
+                    "train_batch_size": self.train_batch_size,
+                    "sample_batch_size": self.sample_batch_size,
+                    "answers_per_question": self.num_answers_per_question,
+                    "eval_interval": self.eval_interval,
+                    "sync_interval": self.sync_interval,
+                },
+            )
+            wandb.define_metric("train/step")
+            wandb.define_metric("train/*", step_metric="train/step")
+            wandb.define_metric("eval/*", step_metric="train/step")
+            print(f"W&B已启用: {self.wandb_run.url}")
+        except Exception as e:
+            print(f"W&B初始化失败，训练继续运行: {e}")
+
+    def log_wandb(self, metrics: dict, step: int):
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.log({"train/step": step, **metrics})
+        except Exception as e:
+            print(f"W&B记录失败，后续训练将不再尝试记录: {e}")
+            self.wandb_run = None
+
+    def log_evaluation(self, step: int, accuracy: float, format_accuracy: float, answer_accuracy: float, entropy: float, duration: float):
+        self.log_wandb(
+            {
+                "eval/joint_accuracy": accuracy,
+                "eval/format_accuracy": format_accuracy,
+                "eval/answer_accuracy": answer_accuracy,
+                "eval/entropy": entropy,
+                "eval/duration_seconds": duration,
+            },
+            step,
+        )
 
     def deserialize_episodes(self, serialized_data):
         """反序列化episodes数据"""
@@ -338,7 +394,9 @@ class TrainingWorker:
         if self.is_main_process and train_step % self.eval_interval == 0:
             eval_start_time = time.time()
             accuracy, format_accuracy, answer_accuracy, entropy = self.evaluate()
-            print(f"第 {train_step} 步训练后评估模型性能, 格式准确率: {format_accuracy}, 回答准确率: {answer_accuracy}, 平均熵: {entropy}, 评估时间: {time.time() - eval_start_time:.2f}")
+            eval_duration = time.time() - eval_start_time
+            self.log_evaluation(train_step, accuracy, format_accuracy, answer_accuracy, entropy, eval_duration)
+            print(f"第 {train_step} 步训练后评估模型性能, 格式准确率: {format_accuracy}, 回答准确率: {answer_accuracy}, 平均熵: {entropy}, 评估时间: {eval_duration:.2f}")
         try:
             while not self.stop_event.is_set():
                 try:
@@ -375,6 +433,25 @@ class TrainingWorker:
                     loss = self.train_step(episodes)
                     train_step += 1
 
+                    format_rewards = np.asarray([episode.reward_info["format_reward"] for episode in episodes], dtype=np.float32)
+                    answer_rewards = np.asarray([episode.reward_info["answer_reward"] for episode in episodes], dtype=np.float32)
+                    self.log_wandb(
+                        {
+                            "train/loss": float(loss.detach().float().item()),
+                            "train/reward_mean": float(np.mean(rewards)),
+                            "train/reward_std": float(np.std(rewards)),
+                            "train/format_reward_mean": float(format_rewards.mean()),
+                            "train/answer_reward_mean": float(answer_rewards.mean()),
+                            "train/format_accuracy": float(np.mean(np.isclose(format_rewards, 1.25))),
+                            "train/answer_accuracy": float(np.mean(np.isclose(answer_rewards, 1.0))),
+                            "train/joint_accuracy": float(np.mean(np.isclose(rewards, 2.25))),
+                            "train/episode_count": len(episodes),
+                            "train/question_count": len(episodes) // self.num_answers_per_question,
+                            "train/learning_rate": float(self.optimizer.param_groups[0].get("lr", self.learning_rate)),
+                        },
+                        train_step,
+                    )
+
                     # 定期同步模型参数（只有主进程需要同步到采样进程）
                     if self.is_main_process and train_step % self.sync_interval == 0:
                         if self.use_lora:
@@ -389,7 +466,9 @@ class TrainingWorker:
                     if self.is_main_process and train_step % self.eval_interval == 0:
                         eval_start_time = time.time()
                         accuracy, format_accuracy, answer_accuracy, entropy = self.evaluate()
-                        print(f"第 {train_step} 步训练后评估模型性能, 格式准确率: {format_accuracy}, 回答准确率: {answer_accuracy}, 平均熵: {entropy}, 评估时间: {time.time() - eval_start_time:.2f}")
+                        eval_duration = time.time() - eval_start_time
+                        self.log_evaluation(train_step, accuracy, format_accuracy, answer_accuracy, entropy, eval_duration)
+                        print(f"第 {train_step} 步训练后评估模型性能, 格式准确率: {format_accuracy}, 回答准确率: {answer_accuracy}, 平均熵: {entropy}, 评估时间: {eval_duration:.2f}")
 
                 except zmq.Again:
                     # 没有数据，继续循环
@@ -419,6 +498,13 @@ class TrainingWorker:
                 self.data_receiver.close()
             if hasattr(self, 'sync_sender') and self.sync_sender:
                 self.sync_sender.close()
+
+        if self.wandb_run is not None:
+            try:
+                self.wandb_run.finish()
+            except Exception as e:
+                print(f"W&B结束运行失败: {e}")
+            self.wandb_run = None
 
         if hasattr(self, 'context'):
             self.context.term()
